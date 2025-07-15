@@ -1,0 +1,35 @@
+name: "unet" 
+backend: "tensorrt"
+platform: "tensorrt_plan"
+max_batch_size: 0
+
+version_policy: { specific { versions: [2] } }
+input [
+  {
+    name: "sample"
+    data_type: TYPE_FP16
+    dims: [ -1, 4, 64, 64 ]
+  },
+  {
+    name: "timestep"
+    data_type: TYPE_FP16
+    dims: [ 1 ]
+  },
+  {
+    name: "encoder_hidden_states"
+    data_type: TYPE_FP16
+    dims: [ -1, 77, 768 ]
+  }
+]
+output [
+  {
+    name: "outputs"
+    data_type: TYPE_FP16
+    dims: [ -1, 4, 64, 64 ]
+  }
+]
+instance_group [
+  {
+    kind: KIND_GPU
+  }
+]

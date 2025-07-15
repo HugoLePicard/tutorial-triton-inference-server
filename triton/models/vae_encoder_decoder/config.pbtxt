@@ -1,0 +1,48 @@
+name: "vae_encoder_decoder"
+platform: "ensemble"
+max_batch_size: 0
+
+input [
+  {
+    name: "image"
+    data_type: TYPE_FP16
+    dims: [ -1, 3, 512, 512 ]
+  }
+]
+
+output [
+  {
+    name: "image_out"
+    data_type: TYPE_FP16
+    dims: [ -1, 3, 512, 512 ]
+  }
+]
+
+ensemble_scheduling {
+  step [
+    {
+      model_name: "vae_encoder"
+      model_version: 2
+      input_map {
+        key: "image"
+        value: "image"
+      }
+      output_map {
+        key: "sample"
+        value: "sample_latents"
+      }
+    },
+    {
+      model_name: "vae_decoder"
+      model_version: 2
+      input_map {
+        key: "sample"
+        value: "sample_latents"
+      }
+      output_map {
+        key: "image"
+        value: "image_out"
+      }
+    }
+  ]
+}

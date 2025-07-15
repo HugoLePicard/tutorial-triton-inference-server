@@ -1,0 +1,25 @@
+name: "vae_encoder" 
+backend: "tensorrt"
+platform: "tensorrt_plan"
+max_batch_size: 0
+
+version_policy: { specific { versions: [2] } }
+input [
+  {
+    name: "image"
+    data_type: TYPE_FP16
+    dims: [ -1, 3, 512, 512 ]
+  }
+]
+output [
+  {
+    name: "sample"
+    data_type: TYPE_FP16
+    dims: [ -1, 4, 64, 64 ]
+  }
+]
+instance_group [
+  {
+    kind: KIND_GPU
+  }
+]

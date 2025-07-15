@@ -1,0 +1,25 @@
+name: "text_encoder" 
+backend: "tensorrt"
+platform: "tensorrt_plan"
+max_batch_size: 0
+
+version_policy: { specific { versions: [2] } }
+input [
+  {
+    name: "tokens"
+    data_type: TYPE_INT64
+    dims: [ -1, 77]
+  }
+]
+output [
+  {
+    name: "last_hidden_state"
+    data_type: TYPE_FP16
+    dims: [ -1, -1, 768 ]
+  },
+  {
+    name: "pooler_out"
+    data_type: TYPE_FP16
+    dims: [ -1, 768 ]
+  }
+]
