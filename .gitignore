@@ -1,5 +1,5 @@
 .vscode
-data/**/*.onnx
-triton/**/*.onnx
 *__pycache__
 *.egg-info
+*.plan
+*.onnx
