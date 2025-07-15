@@ -1,0 +1,9 @@
+torch
+torchvision
+numpy
+onnx
+onnxruntime
+packaging
+diffusers
+transformers
+tritonclient[all]
