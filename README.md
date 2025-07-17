@@ -854,8 +854,8 @@ However, some latency remains due to:
 As estimated earlier:
 
 - 50 UNet steps × 14.76 ms = 738 ms
-- + Text encoder (~0.86 ms)
-- + VAE decoder (~17.05 ms)
+- `+` Text encoder (~0.86 ms)
+- `+` VAE decoder (~17.05 ms)
 
 Total theoretical compute time: **~756.9 ms**
 
