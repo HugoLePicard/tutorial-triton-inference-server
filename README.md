@@ -771,8 +771,8 @@ Sending tensors to submodels:
 inference_request = pb_utils.InferenceRequest(
     model_name = "unet",
     inputs = [
-        pb_utils.Tensor.from_dlpack("sample", torch.to_dlpack(latent_model_input)),
-        pb_utils.Tensor.from_dlpack("timestep", torch.to_dlpack(timestep)),
+        pb_utils.Tensor.from_dlpack("sample"               , torch.to_dlpack(latent_model_input)),
+        pb_utils.Tensor.from_dlpack("timestep"             , torch.to_dlpack(timestep)),
         pb_utils.Tensor.from_dlpack("encoder_hidden_states", torch.to_dlpack(prompt_embeds)),
     ],
     requested_output_names = ["outputs"]
@@ -816,7 +816,7 @@ This script sends a request to `pipeline_text_to_image` with high-level inputs l
 
 This marks the transition from a **client-driven pipeline** to a **fully self-contained server-side inference system**.
 
-# Benchmarking the Three Pipelines
+## Step 10 - Benchmarking the Three Pipelines
 
 You can run the following script to benchmark and compare the three pipelines:
 
@@ -824,26 +824,39 @@ You can run the following script to benchmark and compare the three pipelines:
 scripts/benchmark_pipelines.py
 ```
 
-## This script benchmarks:
-- Hugging Face Diffusers (pure PyTorch)
-- Triton Ensemble Pipeline (client-side orchestration)
-- Triton BLS Pipeline (server-side orchestration via Python backend)
+### This script benchmarks:
 
-## Results (20 runs)
+- **Hugging Face Diffusers** (pure PyTorch)
+- **Triton Ensemble Pipeline** (client-side orchestration)
+- **Triton BLS Pipeline** (server-side orchestration via Python backend)
+
+### Results (for 20 runs)
+
 ```less
-HuggingFace Diffusers Average Time: 2.35 s ± 0.20 s  
-Triton Ensemble        Average Time: 0.97 s ± 0.01 s  
-Triton BLS             Average Time: 0.91 s ± 0.01 s  
+Hugging Face Diffusers  Average Time: 2.35 s ± 0.20 s  
+Triton Ensemble         Average Time: 0.97 s ± 0.01 s  
+Triton BLS              Average Time: 0.91 s ± 0.01 s 
 ```
 
-These results show the performance improvements achieved by offloading computation to Triton and minimizing client-side logic. The BLS version is the fastest, with everything handled directly on the server.
+These results demonstrate the performance improvements gained by offloading computation to Triton and reducing client-side logic. The **Triton BLS** version is the fastest, with everything handled server-side, including orchestration, latent processing, and memory management.
 
-These results highlight the significant performance gains from offloading computation to Triton Inference Server. By eliminating Python overhead and leveraging optimized TensorRT engines, the inference time drops by more than half compared to the Hugging Face implementation.
+### Why the BLS Pipeline Is Fastest
 
-The Triton BLS version is the fastest overall, as the entire pipeline is handled server-side — including model orchestration, latent processing, and memory management.
+By eliminating some Python overhead and leveraging optimized TensorRT engines, inference time drops by more than half compared to the Hugging Face implementation.
 
-The remaining latency is mostly due to:
-- Python execution within the BLS model.py (control flow, tensor conversions, etc.)
-- gRPC communication overhead (sending the prompt and retrieving the final image over the network)
+However, some latency remains due to:
 
-In pure compute terms (as estimated earlier), the pipeline could theoretically run in ~756 ms — so we're very close to the hardware limits, with most of the gap explained by I/O and Python glue logic.
+- Python execution inside `model.py` (control flow, tensor handling)
+- gRPC overhead (sending the prompt and receiving the final image)
+
+### Theoretical Minimum
+
+As estimated earlier:
+
+- 50 UNet steps × 14.76 ms = 738 ms
+- + Text encoder (~0.86 ms)
+- + VAE decoder (~17.05 ms)
+
+Total theoretical compute time: **~756.9 ms**
+
+The Triton BLS pipeline comes close to this limit, with most of the remaining gap explained by I/O and the overhead of lightweight Python glue logic.
