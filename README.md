@@ -1,73 +1,90 @@
-# Tutorial: Deploying Deep Learning Models with TensorRT & Triton Inference Server
+# Deploying Deep Learning Models with TensorRT & Triton Inference Server
+*A step-by-step tutorial using Stable Diffusion*
 
-## Model Optimization & Inference at Scale
+### What is TensorRT and Triton Inference Server
 
-This is a hands-on tutorial designed to help you get practical experience with TensorRT and Triton Inference Server — two powerful tools for deploying deep learning models in production.
+This hands-on tutorial will guide you through deploying deep learning models in production using two powerful tools from NVIDIA:
 
-- **TensorRT** is NVIDIA’s high-performance deep learning inference optimizer and runtime. It helps speed up models, notably on GPUs.
-- **Triton Inference Server** is NVIDIA’s production-ready tool for serving deep learning models. It simplifies deployment by handling queuing, batching, scheduling, and supports models from many frameworks (PyTorch, TensorFlow, ONNX, etc.).
+- **TensorRT** is a high-performance inference optimizer and runtime that accelerates deep learning models, especially on NVIDIA GPUs.
+- **Triton Inference Server** is a scalable, production-ready platform for serving models. It handles queuing, batching, scheduling, and supports models from multiple frameworks (PyTorch, TensorFlow, ONNX, and more).
 
-In this tutorial, we'll take a complete Stable Diffusion v1.5 pipeline, convert its components to ONNX, optimize them using TensorRT, and deploy the full pipeline on Triton Inference Server.
+### What You’ll Learn
 
-We'll cover:
+In this tutorial, you’ll walk through the full deployment of a Stable Diffusion v1.5 pipeline:
 
-- Converting and optimizing models with TensorRT
-- What is a model ensemble and how to build one
-- How to use Triton's Python backend and BLS (Business Logic Scripting)
-- How to build an ensemble of ensembles for multi-stage inference
+- Convert model components to ONNX
+- Optimize them using TensorRT
+- Deploy and serve them with Triton Inference Server
 
-This is not an advanced or exhaustive guide. It’s meant to provide a working example and walk through the full deployment flow in a clear, hands-on way. The goal is to help you understand how the pieces fit together — not to go deep into every component.
+Along the way, you’ll learn how to:
+
+- Convert and optimize models for GPU inference
+- Use Triton’s ensemble models to link components
+- Write Python-based orchestration with Triton’s Business Logic Scripting (BLS)
+- Chain multiple ensembles into a multi-stage pipeline
+
+### Disclaimer
+
+This is not an advanced or exhaustive guide. The goal is to provide a working example that walks through the entire deployment process — from model conversion to production inference — in a clear, practical way.
+
+Where relevant, we’ll point you to the official documentation and references for deeper dives.
 
 ## Installation
 
-Clone the repository and install the required Python packages:
+First, clone the repository and install the required Python packages:
 
 ```bash
-git clone https://github.com/your-username/tutorial-triton-inference-server.git
+git clone https://github.com/HugoLePicard/tutorial-triton-inference-server.git
 cd tutorial-triton-inference-server
 pip install -r requirements.txt
 ```
 
-We also include a setup.py to make local imports easier when working across multiple scripts.
-
-To install the project in editable mode (so you can import modules like from utils import X):
+To make local imports easier across multiple scripts, we provide a setup.py. You can install the project in editable mode using:
 
 ```bash
 pip install -e .
 ```
 
-This will allow you to use relative imports cleanly throughout the project, without needing to modify PYTHONPATH.
+This allows you to import internal modules (e.g., from utils import X) without modifying your PYTHONPATH.
 
 ## Step 1 – Exporting Models to ONNX
 
 ### What is ONNX?
 
-[ONNX](https://onnx.ai/) (Open Neural Network Exchange) is an open standard format for machine learning models. It allows models trained in one framework (like PyTorch) to be exported and run in another (like TensorRT, ONNX Runtime, etc.), enabling flexible and high-performance inference across tools.
+[ONNX](https://onnx.ai/) (Open Neural Network Exchange) is an open standard format for machine learning models. It allows models trained in one framework (like PyTorch) to be exported and run in others (such as TensorRT or ONNX Runtime), enabling flexible and high-performance inference across a wide range of tools.
 
-### Why ONNX for Stable Diffusion?
+### Components to Export in Stable Diffusion
 
-In a diffusion model pipeline, the heaviest components in terms of computation are:
+In a typical diffusion model pipeline, the most computationally intensive components are:
 
 - The **Text Encoder** (usually a CLIP transformer)
 - The **UNet** (the denoising core of the model)
 - The **VAE Decoder** (to reconstruct images from latents)
 - The **VAE Encoder** (if using img2img or other conditioning)
 
-These are the components we'll export to ONNX in this tutorial.
+These are the components we’ll convert to ONNX in this tutorial.
 
 All export scripts are located in the `/optim` folder:
 
+```bash
 optim/
 ├── convert_text_encoder_to_onnx.py
 ├── convert_unet_to_onnx.py
 ├── convert_vae_decoder_to_onnx.py
 ├── convert_vae_encoder_to_onnx.py
+```
 
-Each script loads the original model from Hugging Face using the `diffusers` library and exports it to ONNX format using `torch.onnx.export`.
+Each script loads the original model from Hugging Face using the diffusers library, and exports it to ONNX format using torch.onnx.export. 
+
+This makes the models portable and ready for hardware-optimized inference with tools like TensorRT.
 
 ### Dynamic Axes: Flexibility vs Performance
 
-When exporting to ONNX, you can choose which dimensions of your inputs are **dynamic** — i.e., allowed to change at inference time.
+To keep this tutorial focused and practical, we’ll only cover **dynamic batch axes** when exporting models to ONNX. This is the most relevant case for our use case and has direct implications for the TensorRT conversion step later on.
+
+If you're interested in exploring more advanced options, you can refer to the [PyTorch ONNX export documentation](https://pytorch.org/docs/stable/onnx.html#torch.onnx.export).
+
+When exporting to ONNX, you can choose which input dimensions are **dynamic** — meaning they’re allowed to vary at inference time.
 
 For example:
 
@@ -78,17 +95,22 @@ dynamic_axes = {
 }
 ```
 
-Here, the batch dimension is dynamic, which means the model will accept any batch size. This adds flexibility for deployment, especially in production queues. However, dynamic axes can limit the optimization TensorRT can apply (compared to fully static shapes), possibly reducing performance gains.
+In this case, the batch dimension (0) is dynamic. This allows the model to accept variable batch sizes during inference, which is particularly useful in production environments where inputs may be batched dynamically.
 
-You can make:
+However, this flexibility comes at a cost: TensorRT optimizations are most effective when input shapes are fixed. The more dynamic the shapes, the fewer assumptions TensorRT can make, and the smaller the performance gain.
 
-All axes static (faster but rigid)
+You can choose to:
 
-Some axes dynamic (flexible with moderate optimization)
+Use static axes (e.g., fixed batch size and resolution)
+- Fastest inference, but rigid and less reusable.
 
-All axes dynamic (most flexible, least optimized)
+Make some axes dynamic (e.g., batch size only)
+- Good balance between performance and flexibility.
 
-In this tutorial, we’ll keep things simple and only make the batch axis dynamic.
+Allow all axes to be dynamic
+- Maximum flexibility, but minimal TensorRT optimization.
+
+In our export scripts, we also make sure to export the models in FP16 format, which is supported by both ONNX and TensorRT. Using FP16 reduces memory usage and increases inference speed on modern GPUs, especially during TensorRT optimization in the next step.
 
 Lets run those scripts one by one with :
 
@@ -103,71 +125,74 @@ Next step: we’ll optimize these ONNX models with TensorRT.
 
 ## Step 2 – Optimizing ONNX Models with TensorRT
 
-### Why use Docker?
+Now that we’ve exported the core components of Stable Diffusion to ONNX, the next step is to optimize them for fast inference on GPU hardware.
 
-TensorRT is tightly coupled with specific versions of CUDA, cuDNN, and PyTorch. Instead of installing and maintaining this stack locally, we’ll use **Docker** to keep everything isolated and reproducible.
+For this, we’ll use **NVIDIA TensorRT**, a high-performance inference engine that compiles your ONNX graphs into GPU-specific executables called `.plan` files. These files are highly optimized and can drastically reduce latency during inference.
+
+TensorRT supports multiple precision modes (e.g., FP16, INT8) and applies layer fusion, kernel auto-tuning, and memory optimizations to get the most out of your GPU.
+
+### Why Use Docker?
+
+TensorRT is tightly coupled to specific versions of CUDA, cuDNN, and PyTorch. Managing these dependencies manually can be time-consuming and error-prone.
+
+To keep things clean, consistent, and reproducible, we’ll use **Docker**.
 
 We provide two Dockerfiles:
 
-- `./docker/pytorch/Dockerfile` — for ONNX export and TensorRT optimization
+- `./docker/pytorch/Dockerfile` — for TensorRT optimization
 - `./docker/triton/Dockerfile` — for running the Triton Inference Server later
 
-> It’s important that both Docker images use the **same base image** (here `nvcr.io/nvidia/...:24.10-py3`) to ensure compatibility between the optimized models and the runtime. Different versions may lead to runtime errors or unsupported ops.
+Both Dockerfiles use the same base image (`nvcr.io/nvidia/...:24.10-py3`) to ensure compatibility between the optimized `.plan` files and the runtime. Mismatched versions can lead to runtime errors or unsupported operations.
+
+Also, installing TensorRT manually is notoriously painful, another good reason to containerize the process :)
 
 ### Building the PyTorch + TensorRT Optimization Image
 
-We’ll first build the PyTorch container, which contains all the tooling needed to export and optimize ONNX models with TensorRT.
+We’ll start by building the PyTorch container, which includes all the tools needed to export and optimize ONNX models using TensorRT.
 
 ```bash
 cd ./docker/pytorch
 docker build -t pytorch:latest .
 ```
 
-Once the image is built, we’ll use it to run optimization scripts (next section).
+Once the image is built, we’ll use it to run the optimization scripts in the next step.
 
-The Triton image (./docker/triton/Dockerfile) will be used later when deploying models in production. Let's build it now so its done!
+We’ll also build the Triton container now, which will be used later to serve the optimized models in production:
 
 ```bash
 cd ../triton
 docker build -t triton:latest .
 ```
 
-Go back to root
-
-```bash
-cd ../..
-```
-
 ## Step 3 – Organizing for Triton & Starting Optimization
 
-Now that all models have been exported to ONNX and our Docker images are built, we can move on to optimizing the models with TensorRT and setting up the Triton Inference Server.
+Now that all models have been exported to ONNX and the Docker images are built, we can move on to optimizing the models with TensorRT and preparing them for deployment with Triton Inference Server.
 
 ### Triton Model Repository Structure
 
-Triton follows a strict directory structure for serving models. All models must live inside a single directory (here: `triton/models`), and each model must follow this format:
+Triton follows a strict directory structure for serving models. All models must reside in a single root directory (in our case: `triton/models/`), and each model must follow this format:
 
+```bash
 triton/models/
 ├── unet/
-│ ├── 1/
-│ │ └── model.plan # or model.onnx, depending on what you serve
-│ └── config.pbtxt
+│   ├── 1/
+│   │   └── model.plan  # or model.onnx, depending on what you serve
+│   └── config.pbtxt
 ├── text_encoder/
-│ ├── 1/
-│ │ └── model.plan
-│ └── config.pbtxt
+│   ├── 1/
+│   │   └── model.plan
+│   └── config.pbtxt
+```
 
+Each subdirectory under models/ corresponds to a separate model. Inside each:
+- The 1/ folder contains the versioned model file — either model.onnx (for ONNXRuntime) or model.plan (for TensorRT).
+- The config.pbtxt file defines the model’s input/output names, shapes, data types, batching behavior, and hardware placement (e.g., GPU).
 
-Each subdirectory under `models/` represents a single model. Inside it:
-- The `1/` folder contains the versioned model file (`model.onnx` for ONNX, `model.plan` for TensorRT).
-- The `config.pbtxt` file defines the model’s inputs, outputs, and deployment parameters (like batch size, data types, GPU config, etc.).
+You can technically serve ONNX models directly with Triton, but using TensorRT-optimized `.plan` files usually provides significant speedups, especially on NVIDIA hardware.
 
-> You can technically use ONNX models directly in Triton, but using TensorRT-optimized `.plan` files typically gives a significant boost in inference speed.
+### Preparing the Triton Model Directory
 
-In the next step, we’ll show how to generate `.plan` files from the ONNX models using TensorRT.
-
-## Step 4 – Preparing the Triton Model Directory
-
-Let’s now move our exported ONNX models into the Triton-compatible directory layout.
+Let’s now organize our exported ONNX models into the directory layout expected by Triton.
 
 Run the following script:
 
@@ -175,54 +200,58 @@ Run the following script:
 python ./scripts/move_onnx_models_to_triton.py
 ```
 
-This will simply copy each ONNX model from data/models to triton/models/[model_name]/1/model.onnx and create a 2/ folder for the optimized TensorRT engine (model.plan) later.
+This script copies each ONNX model from `data/models/` into `triton/models/[model_name]/1/model.onnx`, and also creates a `2/` folder for the optimized TensorRT engine (`model.plan`), which we’ll generate in the next step.
 
 ### Triton Model Versioning
-Triton supports model versioning natively. Inside each model folder (unet/, text_encoder/, etc.), you can include multiple version folders like 1/, 2/, etc.
+Triton supports model versioning natively. Inside each model directory (e.g., `unet/`, `text_encoder/`), you can include multiple numbered subfolders such as `1/`, `2/`, etc.
 
-We’ll later configure Triton to use the TensorRT version by pointing to model.plan inside 2/.
+Each subfolder represents a specific version of the model. Triton allows you to control which version is active via the `version_policy` field in `config.pbtxt`.
 
-Next, we’ll run the actual TensorRT optimization step.
+In our case, we’ll configure Triton to use the TensorRT-optimized version in `2/model.plan`.
 
-# Model Compilation with TensorRT
+Next, we’ll convert the exported ONNX files into optimized `.plan` files using TensorRT.
 
-We’ll use a PyTorch-based container (which includes Python and commonly used ML libraries) to compile our models into TensorRT engines. This step is done inside the container to avoid installing TensorRT locally — thanks to Docker’s isolation and prebuilt environments.
+## Step 4 – Model Compilation with TensorRT
 
-## Running the PyTorch Container
+We’ll use a PyTorch-based Docker container (which includes Python and commonly used ML libraries) to compile our ONNX models into optimized TensorRT engines. This step is performed inside the container to avoid installing TensorRT and its dependencies locally.
+
+### Running the PyTorch Container
+
+Start by launching the container:
 
 ```bash
 docker run -it --ipc host -v ./triton:/workspace/triton --gpus=all pytorch:latest bash
 ```
 
-- -it: interactive mode with a shell
-- --ipc host: allows shared memory (needed for TensorRT)
-- -v ./triton:/workspace/triton: mounts your local ./triton directory into the container
-- --gpus=all: enables GPU access
-- pytorch:latest: or any other base image you use that has PyTorch + TensorRT installed
+#### Explanation of flags:
 
-# Inside the Container
+- `-it`: interactive mode with a shell
+- `--ipc host`: allows shared memory (needed for TensorRT)
+- `-v ./triton:/workspace/triton`: mounts your local `./triton` directory into the container
+- `--gpus=all`: enables GPU access
+- `pytorch:latest`: or any other base image you use that has PyTorch + TensorRT installed
 
-Once inside the container:
+### Compiling the models
 
-1. Navigate to the models folder:
+Once inside the container, navigate to the model directory:
 
 ```bash
 cd /triton/models
 ```
 
-2. TensorRT Model Conversion
+You’ll now convert each ONNX model into a TensorRT engine (`.plan` file) optimized for inference.
 
-Once you're inside the Docker container and have cd into /triton/models/[model], it's time to convert each ONNX model into a TensorRT engine (.plan file) optimized for inference.
+#### Why Dynamic Shapes Matter
 
-### Why Dynamic Shapes Matter
+#### Static shapes:
+If your model was exported with fixed input dimensions, you can run a simple `trtexec` command without specifying shape ranges. This yields the best performance but requires fixed inputs.
 
-1. Static shapes: If your model was exported with fixed input shapes, you can run a simple trtexec command without specifying shapes.
+#### Dynamic shapes:
+If your model was exported with dynamic axes (e.g., variable batch sizes or spatial dimensions), you must specify minimum, optimal, and maximum input shapes using flags like `--minShapes`, `--optShapes`, and `--maxShapes`. This allows TensorRT to generate an engine that supports a range of input sizes.
 
-2. Dynamic shapes: If your model was exported with dynamic axes (e.g., variable batch sizes or input dimensions), you must specify minimum, optimum, and maximum input shapes during conversion. This allows TensorRT to build an optimized engine that supports a range of input sizes.
+### Basic Conversion (Static Shapes Only)
 
-## Basic Conversion (No Dynamic Shapes)
-
-If your model has fixed input shapes:
+If your model uses fixed input shapes:
 
 ```bash
 trtexec --onnx=./1/model.onnx \
@@ -230,13 +259,19 @@ trtexec --onnx=./1/model.onnx \
         --fp16
 ```
 
-This uses FP16 precision for better performance and smaller memory footprint. TensorRT will infer the input shapes from the model itself.
+This compiles the ONNX model into a `.plan` file using FP16 precision, which reduces memory usage and improves inference speed. TensorRT automatically infers the input shape from the ONNX graph.
 
-## Custom Shape Configuration (For Dynamic Axes)
+### Custom Shape Configuration (For Dynamic Axes)
 
-If your model includes dynamic shapes, you need to specify shape ranges with --minShapes, --optShapes, and --maxShapes for each input.
+If your model includes dynamic shapes, you'll need to specify shape ranges during compilation:
 
-Here are the recommended shape settings for each model:
+```bash
+--minShapes=input_name:min_dims \
+--optShapes=input_name:opt_dims \
+--maxShapes=input_name:max_dims
+```
+
+Let’s now compile our models one by one.
 
 ### Unet
 
@@ -299,19 +334,17 @@ trtexec \
 
 - Make sure your ONNX models were exported with **dynamic axes** (`dynamic_axes={...}` in `torch.onnx.export`) **if you're specifying custom shapes**. Otherwise, `trtexec` will raise an error about mismatched input shapes during optimization.
 
-- **TensorRT-optimized models are hardware-dependent**. The `.plan` files generated by TensorRT are highly optimized for the **specific GPU architecture** (SM version) used during compilation.
+- **TensorRT-optimized models are hardware-dependent**. The `.plan` files generated by TensorRT are highly optimized for the **specific GPU architecture** used during compilation.
 
   For example:
-  - If you optimize the model on an **NVIDIA A100**, you **must** deploy it on another A100 or a GPU with the **same compute capability**.
+  - If you optimize the model on an **NVIDIA A100**, you **must** deploy it on another A100.
   - To deploy on a different GPU (e.g., T4, V100, or RTX 4090), you’ll need to **recompile the engine** using `trtexec` on that target GPU.
 
-  This ensures the generated kernels match the GPU's architecture and capabilities.
+### Results
 
-# Results
+When you run `trtexec` on a model, TensorRT will not only optimize and export the `.plan` file, it will also benchmark the model's GPU inference performance. After a short warmup and a few runs, you'll see output like:
 
-When you run trtexec on a model, TensorRT will not only optimize and export the .plan file, it will also benchmark the model's GPU inference performance. After a short warmup and a few runs, you'll see output like:
-
-## Example Benchmark Results on A100 40G
+#### Example Benchmark Results on A100 40G
 
 For the UNet:
 
@@ -327,7 +360,7 @@ For the Text Encoder:
 [I] GPU Compute Time: mean = 0.855457 ms
 ```
 
-This is extremely fast, less than 1 millisecond. It’s only run once at the beginning to encode the text prompt.
+This is quite fast, less than 1 millisecond. It’s only run once at the beginning to encode the text prompt.
 
 For the VAE Encoder:
 
@@ -345,7 +378,7 @@ For the VAE Decoder:
 
 This decodes the final latent back to an image, typically run once at the end of the diffusion loop.
 
-## How to Interpret the Metrics
+#### How to Interpret the Metrics
 
 Each result gives:
 
@@ -357,15 +390,15 @@ Each result gives:
 
 These numbers help you understand latency stability and identify performance bottlenecks.
 
-## Total Inference Time for 50 Diffusion Steps (Theoretical)
+### Total Inference Time for 50 Diffusion Steps (Theoretical)
 
-In a standard Stable Diffusion pipeline:
+In a typical Stable Diffusion pipeline:
 
-- You run the UNet once per denoising step: 50 steps ⇒ 50 × UNet
-- The Text Encoder is run once at the beginning
-- The VAE Decoder is run once at the end to produce the final image
+- The UNet runs once per denoising step: 50 steps = 50 UNet calls
+- The Text Encoder runs once at the beginning
+- The VAE Decoder runs once at the end
 
-So, total compute time in the ideal case (no overhead):
+So, in an ideal scenario (excluding overhead):
 
 ```bash
 Total ≈ (50 × UNet time) + Text Encoder time + VAE Decoder time
@@ -374,9 +407,14 @@ Total ≈ (50 × UNet time) + Text Encoder time + VAE Decoder time
       ≈ ~756.9 ms
 ```
 
-That’s approximately 1.32 frames per second, which remains very fast for full-resolution image generation — thanks to TensorRT’s low-latency execution on high-performance GPUs like the A100.
+That’s approximately 1.32 frames per second, which is fast for image generation, thanks to TensorRT’s low-latency execution on high-performance GPUs like the A100.
 
-# Triton Inference Server - Model Config Explanation (`config.pbtxt`)
+For more details on TensorRT capabilities, optimization techniques, and deployment workflows, check out the official NVIDIA TensorRT documentation: https://docs.nvidia.com/deeplearning/tensorrt
+You can also explore the source code, samples, and OSS contributions on GitHub: https://github.com/NVIDIA/TensorRT
+
+## Step 5 - Triton Inference Server
+
+### Model Config Explanation (`config.pbtxt`)
 
 This document explains how to define a standard model configuration for use with Triton Inference Server, specifically for models optimized with TensorRT. This is **not** an ensemble model — it is a basic configuration for a single optimized model.
 
