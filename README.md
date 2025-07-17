@@ -413,6 +413,8 @@ You can also explore the source code, samples, and OSS contributions on GitHub: 
 
 ## Step 5 – Triton Inference Server
 
+Triton Inference Server is an inference serving platform developed by NVIDIA. It streamlines the deployment of machine learning models at scale, supporting features like dynamic batching, model versioning, concurrent execution, and multi-framework support (PyTorch, TensorFlow, ONNX, TensorRT, etc.).
+
 ### Model Config Explanation (`config.pbtxt`)
 
 This document explains how to define a standard model configuration for use with Triton Inference Server, specifically for models optimized with TensorRT.
@@ -560,9 +562,9 @@ To control GPU selection and parallelism. For more on this, see https://docs.nvi
 - If your TensorRT optimization used `--fp16`, you must set data_type: `TYPE_FP16`.
 - Use `trtexec` logs to inspect actual tensor names and shapes to verify alignment.
 
-# Launching the Triton Inference Server
+## Step 7 - Launching the Triton Inference Server
 
-Once all your models are in place under the triton/models/ directory (with the correct config.pbtxt and serialized model.plan files), you can launch the Triton Inference Server using Docker:
+Once all your models are in place under the `triton/models/` directory (with the correct `config.pbtxt` and serialized `model.plan` files), you can launch the Triton Inference Server using Docker:
 
 ```bash
 docker run --gpus all --rm \
@@ -573,14 +575,18 @@ docker run --gpus all --rm \
   tritonserver --model-repository=/models
 ```
 
-- --gpus all: enables GPU access
-- --shm-size=10g: increases shared memory size to avoid out-of-memory errors for large tensors
-- -v ./triton/models/:/models: mounts your local models directory
-- tritonserver --model-repository=/models: tells Triton where to find your models
+**Explanation of flags:**
 
-## Querying Individual Models in Python
+- `--gpus all`: Enables access to all available GPUs
+- `--shm-size=10g`: Increases shared memory to avoid out-of-memory errors for large tensors
+- `-v ./triton/models/:/models`: Mounts your local model repository into the container
+- `tritonserver --model-repository=/models`: Launches the Triton server using the mounted model directory
 
-Once the server is running, you can send inference requests using the Triton Python client. Example for one component (e.g., vae_decoder, unet, or text_encoder):
+## Step 8 - Querying Individual Models in Python
+
+Once the server is running, you can send inference requests using the Triton Python client.
+
+Here’s a basic example for querying a single model (e.g., `vae_decoder`, `unet`, or `text_encoder`):
 
 ```python
 import numpy
@@ -600,81 +606,88 @@ result = client.infer(
 output_array = result.as_numpy("your_output_name_here")
 ```
 
-Key Components
-- InferInput("sample", shape, dtype): Matches the model's config.pbtxt input name and shape.
-- .set_data_from_numpy(...): Loads the NumPy data into the request.
-- client.infer(...): Sends the request to a specific model.
-- as_numpy(...): Extracts the output as a NumPy array.
+### Key Components
+
+- `InferInput("sample", shape, dtype)`: Must match the name and shape declared in `config.pbtxt`.
+- `.set_data_from_numpy(...)`: Loads the NumPy tensor into the request.
+- `client.infer(...)`: Sends the inference request to a specific model on the server.
+- `.as_numpy(...)`: Extracts the model's output as a NumPy array.
 
 Repeat the same logic for other models:
 
-- For the text encoder, input would be input_ids, output last_hidden_state.
-- For the unet, inputs would include sample, timestep, and encoder_hidden_states.
-- For the vae decoder, input is sample, output is image.
+- **Text encoder:** Input → `input_ids`, Output → `last_hidden_state`
+- **UNet:** Inputs → `sample`, `timestep`, `encoder_hidden_states`
+- **VAE decoder:** Input → `sample`, Output → `image`
 
-## Next Step: Stitching the Pipeline Together with BLS
+## Step 9 – Stitching the Pipeline Together with BLS
 
-Now that each component (text encoder, UNet, VAE encoder/decoder) is individually deployable and callable, we are ready to link them together into a single pipeline using BLS (Backend Lifecycle Scripting).
+Now that each component (text encoder, UNet, VAE encoder/decoder) is individually deployable and callable, we’re ready to link them into a single pipeline using **BLS (Business Logic Scripting)**.
 
-BLS lets you define a custom Python backend model that orchestrates multiple sub-model calls inside Triton itself — no need to call each model from your client manually. 
+BLS allows you to define a custom Python backend model that orchestrates multiple sub-model calls directly inside Triton, no need for the client to manage them manually.
 
-We'll define a Python model under triton/models/pipeline_text_to_image/ and script the full inference logic using Triton's Python backend API.
+We’ll define a Python model under `triton/models/pipeline_text_to_image/` and script the full inference logic using Triton's Python backend API.
 
-Let’s build that next.
+---
 
-# A Minimal Stable Diffusion Pipeline (Client-Side)
-Before moving on to implementing the full pipeline using BLS (Backend Lifecycle Scripting) in Triton, which can be cumbersome and less developer-friendly, we recommend starting with a client-side implementation.
+### A Minimal Stable Diffusion Pipeline (Client-Side)
 
-## Why?
-- Debugging and iteration are much faster on the client.
-- You get complete control over the pipeline logic.
-- You can test each model independently and ensure inputs/outputs align.
-- Once everything works, you can port it step-by-step into Triton BLS with confidence.
+Before implementing the full pipeline using BLS (which can be harder to iterate on), we recommend starting with a simple **client-side pipeline**. This makes testing and debugging much easier.
 
-## What This Looks Like
-Instead of building an ensemble model or BLS backend right away, we call each model individually from the client in Python:
+#### Why?
 
-1. Text encoder:
-    - Call the text_encoder model to get the conditioning (encoder_hidden_states).
+- Faster iteration and easier debugging
+- Full control over the pipeline logic in Python
+- Ensures all inputs and outputs are aligned
+- Makes the later transition to BLS safer and more reliable
 
-2. UNet loop:
-    - For each timestep in the denoising process, call the unet model with the current latent and conditioning.
+#### What This Looks Like
 
-3. VAE decoder:
-    - Call the vae_decoder model once at the end to decode the latent into an image.
+Rather than building a BLS backend immediately, we call each model individually from the client:
 
-This mimics the structure of Hugging Face's StableDiffusionPipeline, but each model call is routed through Triton.
+1. **Text Encoder**  
+   → Call the `text_encoder` model to generate `encoder_hidden_states`
 
-## Minimal Implementation
-We rewrote a minimalist version of the StableDiffusionPipeline from the 🤗 diffusers library, keeping only the essentials to interface with Triton.
+2. **UNet Loop**  
+   → For each denoising timestep, call the `unet` with the latent + conditioning
 
-You can find the pipeline implementation here:
+3. **VAE Decoder**  
+   → Call the `vae_decoder` once at the end to decode the latent into an image
+
+This structure mirrors Hugging Face’s `StableDiffusionPipeline`, but each step is routed through Triton.
+
+#### Minimal Implementation
+
+We provide a minimal version of the pipeline that interacts with Triton, inspired by 🤗 `diffusers`, but stripped to the essentials.
+
+Implementation:
 
 ```bash
 pipelines/ensemble.py
 ```
 
-To test if everything works end-to-end with your deployed models, run the following script:
+To test it end-to-end:
 
 ```bash
 ./scripts/run_ensemble_pipeline.py
 ```
 
-This will:
+This script will:
 
 - Load a prompt
-- Encode it with the text_encoder
-- Run the diffusion process with the unet
-- Decode the final latent with the vae_decoder
+- Encode it with the `text_encoder`
+- Run the UNet loop over multiple timesteps
+- Decode the final latent using `vae_decoder`
 - Output the generated image
 
-Once you have verified this works correctly on the client side, you're ready to port the logic to Triton using BLS.
+Once this works, you're ready to port the logic into a server-side pipeline using BLS.
 
-# Triton BLS (Backend Lifecycle Scripting) with Python Backend
-Once your pipeline works on the client side, you can move the logic server-side by using Triton’s Python backend. This allows you to define a full end-to-end pipeline (text encoder → unet loop → vae decoder) as a single Triton model called something like pipeline_text_to_image.
+### Triton BLS (Business Logic Scripting) with Python Backend
 
-## 1. config.pbtxt for the BLS Model
-To enable Python logic, you just need a minimal config.pbtxt:
+Once your client-side pipeline works, you can move the logic server-side using Triton’s Python backend. This allows you to define the full Stable Diffusion pipeline (text → latent → image) as a single model.
+
+#### 1. `config.pbtxt` for the BLS Model
+
+To enable a Python backend, you only need a minimal config:
 
 ```protobuf
 name: "pipeline_text_to_image"
@@ -682,15 +695,17 @@ backend: "python"
 max_batch_size: 0
 ```
 
-This model doesn’t contain any .onnx or .plan file — instead, Triton will expect to find a model.py file under the 1/ folder:
+Triton expects the Python script inside:
 
+```bash
 triton/models/pipeline_text_to_image/
 ├── 1/
 │   └── model.py
 └── config.pbtxt
+```
 
-## 2. Basics of model.py
-Triton requires you to define a class called TritonPythonModel with two key methods:
+#### 2. Basics of model.py
+Triton requires you to define a `TritonPythonModel` class with two methods:
 
 ```python
 class TritonPythonModel:
@@ -708,16 +723,17 @@ class TritonPythonModel:
         return responses
 ```
 
-Each incoming request is an instance of InferenceRequest, and your response must be a list of InferenceResponse objects.
+Each request is an instance of `InferenceRequest`, and must return a list of `InferenceResponse` objects.
 
-## 3. Using pb_utils
-Triton provides a helper module triton_python_backend_utils (imported as pb_utils) to:
+#### 3. Using `pb_utils`
 
-- Parse inputs from a request
-- Call other Triton models (submodels like text_encoder, unet, vae_decoder)
-- Return outputs as InferenceResponse
+Triton provides a helper module, `triton_python_backend_utils` (imported as `pb_utils`), to:
 
-Here’s how to extract and parse input tensors:
+- Parse input tensors from requests
+- Call other Triton models (like `unet`, `text_encoder`, etc.)
+- Build and return output tensors
+
+Example: extracting parameters from the request
 
 ```python
 prompt_tensor = pb_utils.get_input_tensor_by_name(request, "prompt")
@@ -745,13 +761,11 @@ if (negative_prompt_tensor := pb_utils.get_input_tensor_by_name(request, "negati
     ]
 ```
 
-This gives you full control over the inference parameters.
+#### 4. DLPack and Why We Use It
 
-## 4. DLPack and Why We Use It
+Triton supports DLPack for **zero-copy memory sharing** between PyTorch tensors and Triton’s internal format.
 
-Triton supports dlpack for zero-copy memory sharing between PyTorch and Triton’s internal inference format.
-
-This is how you convert PyTorch tensors into Triton-compatible input tensors:
+Sending tensors to submodels:
 
 ```python
 inference_request = pb_utils.InferenceRequest(
@@ -765,7 +779,7 @@ inference_request = pb_utils.InferenceRequest(
 )
 ```
 
-Then execute and parse the response:
+Receiving output from a submodel:
 
 ```python
 inference_response = inference_request.exec()
@@ -776,15 +790,11 @@ output_tensor = pb_utils.get_output_tensor_by_name(inference_response, "outputs"
 output_tensor = torch.from_dlpack(output_tensor.to_dlpack())
 ```
 
-This method avoids CPU round-trips and preserves performance when chaining submodels.
+Using DLPack avoids unnecessary CPU transfers and improves performance when chaining models.
 
-You now have everything in place to move your full Stable Diffusion pipeline into Triton using BLS.
+### Running the Final BLS Pipeline
 
-The logic is fully server-side, with direct model-to-model calls and no client overhead. You can manage prompts, timesteps, random seeds, and loop structure all inside model.py.
-
-# Running the Final BLS Pipeline
-
-Once your pipeline_text_to_image model is defined using Triton’s Python backend (model.py), the client no longer needs to handle the entire diffusion logic. The pipeline becomes extremely lightweight, as Triton now handles all the orchestration server-side.
+Once the `pipeline_text_to_image` model is implemented with `model.py`, your client no longer needs to handle each step of the pipeline. Triton will run the full inference graph server-side.
 
 You can find the minimal client for calling this final BLS pipeline here:
 
@@ -798,9 +808,13 @@ To test it end-to-end, simply run:
 scripts/run_bls_pipeline.py
 ```
 
-This script sends a request to the pipeline_text_to_image model deployed on Triton, passing high-level inputs like prompt, num_inference_steps, and guidance_scale. Triton takes care of everything else — encoding the prompt, looping through the UNet, and decoding the final image.
+This script sends a request to `pipeline_text_to_image` with high-level inputs like `prompt`, `num_inference_steps`, and `guidance_scale`. Triton takes care of the rest:
 
-This marks the transition from a client-driven pipeline to a fully self-contained server-side inference system.
+- Encodes the prompt
+- Runs the UNet loop internally
+- Decodes the final image
+
+This marks the transition from a **client-driven pipeline** to a **fully self-contained server-side inference system**.
 
 # Benchmarking the Three Pipelines
 
